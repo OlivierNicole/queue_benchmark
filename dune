@@ -1,0 +1,14 @@
+(executable
+   (name bench)
+   (modules bench queue)
+   (libraries unix))
+
+(executable
+   (name array_accesses)
+   (modules array_accesses)
+   (libraries unix))
+
+(executable
+   (name bug)
+   (modules bug)
+   (libraries unix))
