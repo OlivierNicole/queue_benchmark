@@ -302,6 +302,13 @@ module BufferQueueArrAtom : QUEUE = struct
 
 end
 
+(* [x] must be a positive power of 2. *)
+let log2 =
+  let rec aux acc x =
+    if x = 1 then acc else aux (acc+1) (x lsr 1)
+  in
+  function x -> aux 0 x
+
 module BufferQueueAtomArr : QUEUE = struct
 
   type 'a t =
@@ -311,6 +318,8 @@ module BufferQueueAtomArr : QUEUE = struct
       mask : int ;
       head : int Atomic.t ;
       tail : int Atomic.t ;
+      blockshift : int ;
+      blockmask : int ;
     }
 
   (* Default recommended capacity: 64 *)
@@ -319,12 +328,19 @@ module BufferQueueAtomArr : QUEUE = struct
     (* check that the capacity is a power of two (not required by the algorithm,
      * but it allows more efficient array lookups): *)
     assert (capacity land (capacity - 1) = 0) ;
+    (* Check that the capacity is a multiple of 8 (required to do index
+       remapping in order to avoid cache line invalidation by adjacent accesses.
+       *)
+    assert (capacity mod 8 = 0) ;
+    let blocksize = capacity / 8 in (* [blocksize] is a power of 2 as well *)
     {
-      timestamps = Array.init capacity (fun i -> i) ;
+      timestamps = Array.init capacity (fun i -> blocksize * (i mod 8) + i / 8) ;
       elements = Array.make capacity dummy ;
       mask = capacity - 1 ; (* i.e. 0b111111 if capacity = 0b1000000 *)
       head = Atomic.make 0 ;
       tail = Atomic.make 0 ;
+      blockmask = blocksize - 1 ; (* see [mask] *)
+      blockshift = log2 blocksize ;
     }
 
   let try_enqueue q x =
@@ -332,11 +348,12 @@ module BufferQueueAtomArr : QUEUE = struct
     let rec try_enqueue () =
       let head = Atomic.get q.head in
       let index = head land q.mask in
-      let ts = Atomic.Array.get q.timestamps index in
+      let real_index = 8 * (index land q.blockmask) + index lsr q.blockshift in
+      let ts = Atomic.Array.get q.timestamps real_index in
       if ts = head && Atomic.compare_and_set q.head head (head+1) then begin
         (* cell is available and we got it first: write our value *)
         q.elements.(index) <- x ;
-        Atomic.Array.set q.timestamps index (head+1) ;
+        Atomic.Array.set q.timestamps real_index (head+1) ;
         true
       end
       else if ts < head then
@@ -359,12 +376,13 @@ module BufferQueueAtomArr : QUEUE = struct
     let rec try_dequeue () =
       let tail = Atomic.get q.tail in
       let index = tail land q.mask in
-      let ts = Atomic.Array.get q.timestamps index in
+      let real_index = 8 * (index land q.blockmask) + index lsr q.blockshift in
+      let ts = Atomic.Array.get q.timestamps real_index in
       if ts = tail+1 && Atomic.compare_and_set q.tail tail (tail+1) then begin
         (* cell is available and we got it first: read its value *)
         let x = q.elements.(index) in
         (*! cell.element <- dummy ; !*) (* TODO for garbage collection *)
-        Atomic.Array.set q.timestamps index (tail + q.mask+1) ;
+        Atomic.Array.set q.timestamps real_index (tail + q.mask+1) ;
         Some x
       end
       else if ts < tail+1 then

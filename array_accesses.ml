@@ -3,7 +3,7 @@ let run_n (n : int) ~(thread : int -> 'a) ~(init : 'b) ~(collect : 'b -> 'a -> '
   Array.fold_left (fun acc th -> collect acc (Domain.join th)) init threads
 
 let bench ~name (f : unit -> unit) =
-  let nruns = 1000 in
+  let nruns = 100 in
   let t0 = Unix.gettimeofday () in
   for _ = 1 to nruns do
     f ()
@@ -47,14 +47,14 @@ let access_boxed_array array length =
     ignore (Sys.opaque_identity x)
   done
 
-let array : int array = Array.make roughly_l2_word_size 42
+let array : int array = Array.make roughly_l1_word_size 42
 
-let () = bench_parallel ~name:"Parallel flat accesses" (fun () -> access_flat_array array roughly_l2_word_size)
+let () = bench_parallel ~name:"Parallel flat accesses" (fun () -> access_flat_array array roughly_l1_word_size)
 
 let array_boxed : int Atomic.t array =
-  Array.make roughly_l2_word_size (Atomic.make 42)
+  Array.make roughly_l1_word_size (Atomic.make 42)
 
-let () = bench_parallel ~name:"Parallel boxed accesses" (fun () -> access_boxed_array array_boxed roughly_l2_word_size)
+let () = bench_parallel ~name:"Parallel boxed accesses" (fun () -> access_boxed_array array_boxed roughly_l1_word_size)
 
 let length_small = 1000
 

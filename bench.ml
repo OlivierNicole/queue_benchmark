@@ -15,12 +15,12 @@ let my_printf fmt = my_fprintf stdout fmt
 
 (*! module Queue = UnboundedQueue !*)
 (*module Queue = UnboundedQueue2*)
-module Queue = Queue.BufferQueueAtomArr
+module Queue = Queue.BufferQueue
 
 
 (** Functional correctness test *)
 
-let nmax = 12_000_000
+let nmax = 1_200_000
 let nb_consumers = 1
 let nb_per_consumer =
   assert (nmax mod nb_consumers = 0) ;
@@ -29,7 +29,7 @@ let nb_producers = 1
 let nb_per_producer =
   assert (nmax mod nb_producers = 0) ;
   nmax / nb_producers
-let channel = Queue.make ~capacity:65536 ~dummy:42
+let channel = Queue.make ~capacity:64 ~dummy:42
 
 let producer i =
   let init = i*nb_per_producer in
@@ -69,8 +69,8 @@ let () =
   done;
   let t1 = Unix.gettimeofday () in
   Printf.printf "#Producers: %i\n#Consumers: %i\n" nb_producers nb_consumers;
-  Printf.printf "Total %i runs: %f\n" nruns (t1 -. t0);
-  Printf.printf "Average time: %f\n" ((t1 -. t0) /. float_of_int nruns)
+  (*Printf.printf "Total %i runs: %f s\n" nruns (t1 -. t0);*)
+  Printf.printf "Average time: %f ms\n" ((t1 -. t0) /. float_of_int nruns *. 1000.)
 
 let () =
   exit 0
