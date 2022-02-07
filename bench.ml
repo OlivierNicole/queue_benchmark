@@ -15,7 +15,7 @@ let my_printf fmt = my_fprintf stdout fmt
 
 (*! module Queue = UnboundedQueue !*)
 (*module Queue = UnboundedQueue2*)
-module Queue = Queue.BufferQueue
+module Queue = Queue.BufferQueueAtomArrOpt
 
 
 (** Functional correctness test *)
@@ -29,7 +29,7 @@ let nb_producers = 1
 let nb_per_producer =
   assert (nmax mod nb_producers = 0) ;
   nmax / nb_producers
-let channel = Queue.make ~capacity:64 ~dummy:42
+let channel = Queue.make ~capacity:8192 ~dummy:42
 
 let producer i =
   let init = i*nb_per_producer in

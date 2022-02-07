@@ -318,6 +318,91 @@ module BufferQueueAtomArr : QUEUE = struct
       mask : int ;
       head : int Atomic.t ;
       tail : int Atomic.t ;
+    }
+
+  (* Default recommended capacity: 64 *)
+  let make ~capacity ~dummy =
+    assert (capacity >= 2) ;
+    (* check that the capacity is a power of two (not required by the algorithm,
+     * but it allows more efficient array lookups): *)
+    assert (capacity land (capacity - 1) = 0) ;
+    {
+      timestamps = Array.init capacity (fun i -> i) ;
+      elements = Array.make capacity dummy ;
+      mask = capacity - 1 ; (* i.e. 0b111111 if capacity = 0b1000000 *)
+      head = Atomic.make 0 ;
+      tail = Atomic.make 0 ;
+    }
+
+  let try_enqueue q x =
+    let bo = ExponentialBackoff.make () in
+    let rec try_enqueue () =
+      let head = Atomic.get q.head in
+      let index = head land q.mask in
+      let ts = Atomic.Array.get q.timestamps index in
+      if ts = head && Atomic.compare_and_set q.head head (head+1) then begin
+        (* cell is available and we got it first: write our value *)
+        q.elements.(index) <- x ;
+        Atomic.Array.set q.timestamps index (head+1) ;
+        true
+      end
+      else if ts < head then
+        (* cell is still in use in previous round: fail here *)
+        false
+      else begin
+        (* either ts > head, or the CAS failed; in either case,
+        * another enqueuer got the cell before us: we try again *)
+        ExponentialBackoff.backoff bo ;
+        try_enqueue ()
+      end
+    in
+    try_enqueue ()
+
+  let enqueue q x =
+    while not @@ try_enqueue q x do () done
+
+  let try_dequeue q =
+    let bo = ExponentialBackoff.make () in
+    let rec try_dequeue () =
+      let tail = Atomic.get q.tail in
+      let index = tail land q.mask in
+      let ts = Atomic.Array.get q.timestamps index in
+      if ts = tail+1 && Atomic.compare_and_set q.tail tail (tail+1) then begin
+        (* cell is available and we got it first: read its value *)
+        let x = q.elements.(index) in
+        (*! cell.element <- dummy ; !*) (* TODO for garbage collection *)
+        Atomic.Array.set q.timestamps index (tail + q.mask+1) ;
+        Some x
+      end
+      else if ts < tail+1 then
+        (* no element has been enqueued in this cell yet: fail here *)
+        None
+      else begin
+        (* either ts > tail+1, or the CAS failed; in either case,
+        * another dequeuer got the cell before us: we try again *)
+        ExponentialBackoff.backoff bo ;
+        try_dequeue ()
+      end
+    in
+    try_dequeue ()
+
+  let rec dequeue q =
+    begin match try_dequeue q with
+    | None   -> dequeue q
+    | Some x -> x
+    end
+
+end
+
+module BufferQueueAtomArrOpt : QUEUE = struct
+
+  type 'a t =
+    {
+      timestamps : int array ;
+      elements : 'a array ;
+      mask : int ;
+      head : int Atomic.t ;
+      tail : int Atomic.t ;
       blockshift : int ;
       blockmask : int ;
     }
@@ -348,7 +433,7 @@ module BufferQueueAtomArr : QUEUE = struct
     let rec try_enqueue () =
       let head = Atomic.get q.head in
       let index = head land q.mask in
-      let real_index = 8 * (index land q.blockmask) + index lsr q.blockshift in
+      let real_index = ((index land q.blockmask) lsl 3) + (index lsr q.blockshift) in
       let ts = Atomic.Array.get q.timestamps real_index in
       if ts = head && Atomic.compare_and_set q.head head (head+1) then begin
         (* cell is available and we got it first: write our value *)
