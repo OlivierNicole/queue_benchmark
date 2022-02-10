@@ -13,7 +13,7 @@ let my_fprintf out =
   end
 let my_printf fmt = my_fprintf stdout fmt
 
-let nmax = 1_200_000
+let nmax = 40_000
 let nb_consumers = 1
 let nb_per_consumer =
   assert (nmax mod nb_consumers = 0) ;
@@ -22,33 +22,41 @@ let nb_producers = 1
 let nb_per_producer =
   assert (nmax mod nb_producers = 0) ;
   nmax / nb_producers
-let capacity = 16_384
+
+let minor_allocated : float array =
+  Array.make (nb_producers + nb_consumers) 42. (* dummy value for debugging *)
 
 module Bench (Q : Queue.QUEUE) = struct
-  let channel = Q.make ~capacity ~dummy:42
+  let allocate capacity = Q.make ~capacity ~dummy:42
 
-  let producer i =
-    let init = i*nb_per_producer in
+  let producer q tid =
+    let init = tid*nb_per_producer in
+    let bo = Queue.ExponentialBackoff.make () in
     for n = init+1 to init+nb_per_producer do
       (*my_printf "enqueue %i…\n" n ;*)
-      Q.enqueue channel n ;
+      Q.enqueue_noalloc q bo n;
       (*my_printf "enqueued\n" ;*)
-    done
+    done;
+    minor_allocated.(tid) <- minor_allocated.(tid) +. Gc.minor_words ()
 
-  let consumer () =
+  let consumer q tid =
     let sum = ref 0 in
+    let tmp = ref 42 in
+    let bo = Queue.ExponentialBackoff.make () in
     for _ = 1 to nb_per_consumer do
       (*my_printf "    dequeue…\n" ;*)
-      let n = Q.dequeue channel in
-      sum := !sum + n ;
+      let () = Q.dequeue_noalloc q tmp bo in
+      Queue.ExponentialBackoff.reset bo;
+      sum := !sum + !tmp ;
       (*my_printf "    dequeued %i\n" n ;*)
     done ;
+    minor_allocated.(tid) <- minor_allocated.(tid) +. Gc.minor_words ();
     !sum
 
-  let f () =
+  let f q =
     let sum =
       run_n (nb_producers + nb_consumers)
-        ~thread:(fun tid -> if tid < nb_producers then (producer tid ; 0) else consumer ())
+        ~thread:(fun tid -> if tid < nb_producers then (producer q tid ; 0) else consumer q tid)
         ~init:0
         ~collect:(+)
     in
@@ -56,43 +64,134 @@ module Bench (Q : Queue.QUEUE) = struct
     assert (sum = nmax * (nmax + 1) / 2) ;
     (*my_printf "done\n"*)
     ()
-
-  let bench ~name =
-    let nruns = 100 in
-    Printf.printf "=== %s ===\n" name;
-    Printf.printf "#Producers: %i\n#Consumers: %i\nCapacity: %i\n%!" nb_producers
-      nb_consumers capacity;
-    let t0 = Unix.gettimeofday () in
-    for _ = 1 to nruns do
-      f ()
-    done;
-    let t1 = Unix.gettimeofday () in
-    (*Printf.printf "Total %i runs: %f s\n" nruns (t1 -. t0);*)
-    Printf.printf "Average time: %f ms\n\n" ((t1 -. t0) /. float_of_int nruns *. 1000.)
 end
 
-module B1 = Bench (Queue.BufferQueue)
-module B2 = Bench (Queue.BufferQueueArrAtom)
-module B3 = Bench (Queue.BufferQueueAtomArr)
-module B4 = Bench (Queue.BufferQueueAtomArrOpt)
+module BOrig = Bench (Queue.BufferQueue)
+module BArrAtom = Bench (Queue.BufferQueueArrAtom)
+module BAtomArr = Bench (Queue.BufferQueueAtomArr)
+module BAtomArrOpt = Bench (Queue.BufferQueueAtomArrOpt)
 
-let orig = ref false
-let arr_atom = ref false
-let atom_arr = ref false
-let atom_arr_opt = ref false
+open Bechamel
+open Toolkit
 
-let speclist =
-  [ ("-orig", Arg.Set orig, "Original queue implementation");
-    ("-arratom", Arg.Set arr_atom, "Array of atomics");
-    ("-atomarr", Arg.Set atom_arr, "Atomic arrays");
-    ("-atomarropt", Arg.Set atom_arr_opt, "Atomic arrays (padded)");
-  ]
+let mk_test ~name ~allocate f =
+  Test.make_indexed_with_resource
+    ~name
+    (*~args:[ 64; 256; 1024; 4096; 16384; 32768 ]*)
+    (*~args:[ 64; 1024; 16384; 32768 ]*)
+    ~args:[ 16384; ]
+    ~fmt:"%s:%05d"
+    Test.uniq
+    ~allocate
+    ~free:(fun _ -> Gc.compact ())
+    f
+
+let test0 =
+  mk_test
+    ~name:"original"
+    ~allocate:BOrig.allocate
+    (fun _ -> Staged.stage BOrig.f)
+(*
+let test1 =
+  mk_test
+    ~name:"array of atomics"
+    ~allocate:BArrAtom.allocate
+    (fun _ -> Staged.stage BArrAtom.f)
+let test2 =
+  mk_test
+    ~name:"atomic array"
+    ~allocate:BAtomArr.allocate
+    (fun _ -> Staged.stage BAtomArr.f)
+*)
+let test3 =
+  mk_test
+    ~name:"padded atomic array"
+    ~allocate:BAtomArrOpt.allocate
+    (fun _ -> Staged.stage BAtomArrOpt.f)
+let test = Test.make_grouped ~name:"sum of integers" ~fmt:"%s (%s)"
+  [ test0; test3 ]
+
+module Producer_minor_allocated = struct
+  type witness = unit
+  let label _ = "producer-minor"
+  let unit _ = "mnw"
+  let make () = ()
+  let load () = ()
+  let unload () = ()
+  let get () =
+    StdLabels.Array.(fold_left ~f:(+.) ~init:0.
+      (sub minor_allocated ~pos:0 ~len:nb_producers))
+end
+
+module Consumer_minor_allocated = struct
+  type witness = unit
+  let label _ = "consumer-minor"
+  let unit _ = "mnw"
+  let make () = ()
+  let load () = ()
+  let unload () = ()
+  let get () =
+    StdLabels.Array.(fold_left ~f:(+.) ~init:0.
+      (sub minor_allocated ~pos:nb_producers ~len:nb_consumers))
+end
+
+module MyMeasures = struct
+  let producer_minor_allocated =
+    Measure.register (module Producer_minor_allocated)
+
+  let consumer_minor_allocated =
+    Measure.register (module Consumer_minor_allocated)
+end
+
+module MyInstance = struct
+  let producer_minor_allocated =
+    Measure.instance
+      (module Producer_minor_allocated)
+      MyMeasures.producer_minor_allocated
+
+  let consumer_minor_allocated =
+    Measure.instance
+      (module Consumer_minor_allocated)
+      MyMeasures.consumer_minor_allocated
+end
+
+let benchmark () =
+  let ols =
+    Analyze.ols ~bootstrap:0 ~r_square:true ~predictors:Measure.[| run |]
+  in
+  let instances =
+    Instance.[ minor_allocated; major_allocated; monotonic_clock;
+      minor_collection; major_collection; ] @
+    MyInstance.[ producer_minor_allocated; consumer_minor_allocated ]
+  in
+  let cfg =
+    Benchmark.cfg ~limit:100 ~quota:(Time.second 20.) ~stabilize:true ()
+  in
+  let raw_results = Benchmark.all cfg instances test in
+  let results =
+    List.map (fun instance -> Analyze.all ols instance raw_results) instances
+  in
+  let results = Analyze.merge ols instances results in
+  (results, raw_results)
 
 let () =
-  Arg.parse speclist
-    (fun _ -> raise (Invalid_argument "anonymous argument not supported"))
-    "bench [-orig] [-arratom] [-atomarr] [-atomarropt]";
-  (if !atom_arr_opt then B4.bench ~name:"Atomic array (padded)");
-  (if !orig then B1.bench ~name:"Original");
-  (if !arr_atom then B2.bench ~name:"Array of atomics");
-  (if !atom_arr then B3.bench ~name:"Atomic array");
+  List.iter
+    (fun v -> Bechamel_notty.Unit.add v (Measure.unit v)) @@
+      Instance.[ minor_allocated; major_allocated; monotonic_clock;
+        minor_collection; major_collection; ] @
+      MyInstance.[ producer_minor_allocated; consumer_minor_allocated ]
+
+let img (window, results) =
+  Bechamel_notty.Multiple.image_of_ols_results ~rect:window
+    ~predictor:Measure.run results
+
+open Notty_unix
+
+let () =
+  let window =
+    match winsize Unix.stdout with
+    | Some (w,h) -> { Bechamel_notty.w; h }
+    | None -> { Bechamel_notty.w = 80; h = 1 }
+  in
+  let results, _ = benchmark () in
+  img (window, results) |> eol |> output_image

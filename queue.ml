@@ -26,6 +26,7 @@ module type BACKOFF = sig
   type t
   val make : ?min:float -> ?max:float -> unit -> t
   val backoff : t -> unit
+  val reset : t -> unit
 end
 
 (* NOTE: This datastructure is not thread-safe. *)
@@ -45,6 +46,8 @@ module ExponentialBackoff : BACKOFF = struct
     bo.cur <- min bo.max (cur +. cur) ;
     (*Domain.Sync.cpu_relax () ;*) (* Obsolete and no-op on x86 *)
     Unix.sleepf (Random.float cur)
+  let reset bo =
+    bo.cur <- bo.min
 end
 
 (*** Lock *********************************************************************)
@@ -115,10 +118,12 @@ end
 module type QUEUE = sig
   type 'a t
   val make : capacity:int -> dummy:'a -> 'a t
-  val try_enqueue : 'a t -> 'a -> bool
+  val try_enqueue : 'a t -> 'a -> ExponentialBackoff.t -> bool
   val enqueue : 'a t -> 'a -> unit
-  val try_dequeue : 'a t -> 'a option
+  val enqueue_noalloc : 'a t -> ExponentialBackoff.t -> 'a -> unit
+  val try_dequeue : 'a t -> 'a ref -> ExponentialBackoff.t -> bool
   val dequeue : 'a t -> 'a
+  val dequeue_noalloc : 'a t -> 'a ref -> ExponentialBackoff.t -> unit
 end
 
 module BufferQueue : QUEUE = struct
@@ -135,6 +140,7 @@ module BufferQueue : QUEUE = struct
       mask : int ;
       head : int Atomic.t ;
       tail : int Atomic.t ;
+      dummy : 'a;
     }
 
   (* Default recommended capacity: 64 *)
@@ -153,10 +159,10 @@ module BufferQueue : QUEUE = struct
       mask = capacity - 1 ; (* i.e. 0b111111 if capacity = 0b1000000 *)
       head = Atomic.make 0 ;
       tail = Atomic.make 0 ;
+      dummy ;
     }
 
-  let try_enqueue q x =
-    let bo = ExponentialBackoff.make () in
+  let try_enqueue q x bo =
     let rec try_enqueue () =
       let head = Atomic.get q.head in
       let cell = q.buf.(head land q.mask) in
@@ -179,11 +185,14 @@ module BufferQueue : QUEUE = struct
     in
     try_enqueue ()
 
-  let enqueue q x =
-    while not @@ try_enqueue q x do () done
+  let enqueue_noalloc q bo x =
+    while not @@ try_enqueue q x bo do () done
 
-  let try_dequeue q =
+  let enqueue q x =
     let bo = ExponentialBackoff.make () in
+    while not @@ try_enqueue q x bo do () done
+
+  let try_dequeue q ref bo =
     let rec try_dequeue () =
       let tail = Atomic.get q.tail in
       let cell = q.buf.(tail land q.mask) in
@@ -193,11 +202,11 @@ module BufferQueue : QUEUE = struct
         let x = cell.element in
         (*! cell.element <- dummy ; !*) (* TODO for garbage collection *)
         Atomic.set cell.timestamp (tail + q.mask+1) ;
-        Some x
+        ref := x; true
       end
       else if ts < tail+1 then
         (* no element has been enqueued in this cell yet: fail here *)
-        None
+        false
       else begin
         (* either ts > tail+1, or the CAS failed; in either case,
         * another dequeuer got the cell before us: we try again *)
@@ -208,10 +217,12 @@ module BufferQueue : QUEUE = struct
     try_dequeue ()
 
   let rec dequeue q =
-    begin match try_dequeue q with
-    | None   -> dequeue q
-    | Some x -> x
-    end
+    let bo = ExponentialBackoff.make () in
+    let ref = ref q.dummy in
+    if try_dequeue q ref bo then !ref else dequeue q
+
+  let rec dequeue_noalloc q ref bo =
+    if try_dequeue q ref bo then () else dequeue_noalloc q ref bo
 
 end
 
@@ -224,6 +235,7 @@ module BufferQueueArrAtom : QUEUE = struct
       mask : int ;
       head : int Atomic.t ;
       tail : int Atomic.t ;
+      dummy : 'a ;
     }
 
   (* Default recommended capacity: 64 *)
@@ -238,10 +250,10 @@ module BufferQueueArrAtom : QUEUE = struct
       mask = capacity - 1 ; (* i.e. 0b111111 if capacity = 0b1000000 *)
       head = Atomic.make 0 ;
       tail = Atomic.make 0 ;
+      dummy ;
     }
 
-  let try_enqueue q x =
-    let bo = ExponentialBackoff.make () in
+  let try_enqueue q x bo =
     let rec try_enqueue () =
       let head = Atomic.get q.head in
       let index = head land q.mask in
@@ -265,11 +277,14 @@ module BufferQueueArrAtom : QUEUE = struct
     in
     try_enqueue ()
 
-  let enqueue q x =
-    while not @@ try_enqueue q x do () done
+  let enqueue_noalloc q bo x =
+    while not @@ try_enqueue q x bo do () done
 
-  let try_dequeue q =
+  let enqueue q x =
     let bo = ExponentialBackoff.make () in
+    while not @@ try_enqueue q x bo do () done
+
+  let try_dequeue q ref bo =
     let rec try_dequeue () =
       let tail = Atomic.get q.tail in
       let index = tail land q.mask in
@@ -280,11 +295,11 @@ module BufferQueueArrAtom : QUEUE = struct
         let x = q.elements.(index) in
         (*! cell.element <- dummy ; !*) (* TODO for garbage collection *)
         Atomic.set r_timestamp (tail + q.mask+1) ;
-        Some x
+        ref := x; true
       end
       else if ts < tail+1 then
         (* no element has been enqueued in this cell yet: fail here *)
-        None
+        false
       else begin
         (* either ts > tail+1, or the CAS failed; in either case,
         * another dequeuer got the cell before us: we try again *)
@@ -295,10 +310,12 @@ module BufferQueueArrAtom : QUEUE = struct
     try_dequeue ()
 
   let rec dequeue q =
-    begin match try_dequeue q with
-    | None   -> dequeue q
-    | Some x -> x
-    end
+    let bo = ExponentialBackoff.make () in
+    let ref = ref q.dummy in
+    if try_dequeue q ref bo then !ref else dequeue q
+
+  let rec dequeue_noalloc q ref bo =
+    if try_dequeue q ref bo then () else dequeue_noalloc q ref bo
 
 end
 
@@ -318,6 +335,7 @@ module BufferQueueAtomArr : QUEUE = struct
       mask : int ;
       head : int Atomic.t ;
       tail : int Atomic.t ;
+      dummy : 'a ;
     }
 
   (* Default recommended capacity: 64 *)
@@ -332,10 +350,10 @@ module BufferQueueAtomArr : QUEUE = struct
       mask = capacity - 1 ; (* i.e. 0b111111 if capacity = 0b1000000 *)
       head = Atomic.make 0 ;
       tail = Atomic.make 0 ;
+      dummy ;
     }
 
-  let try_enqueue q x =
-    let bo = ExponentialBackoff.make () in
+  let try_enqueue q x bo =
     let rec try_enqueue () =
       let head = Atomic.get q.head in
       let index = head land q.mask in
@@ -358,11 +376,14 @@ module BufferQueueAtomArr : QUEUE = struct
     in
     try_enqueue ()
 
-  let enqueue q x =
-    while not @@ try_enqueue q x do () done
+  let enqueue_noalloc q bo x =
+    while not @@ try_enqueue q x bo do () done
 
-  let try_dequeue q =
+  let enqueue q x =
     let bo = ExponentialBackoff.make () in
+    while not @@ try_enqueue q x bo do () done
+
+  let try_dequeue q ref bo =
     let rec try_dequeue () =
       let tail = Atomic.get q.tail in
       let index = tail land q.mask in
@@ -372,11 +393,11 @@ module BufferQueueAtomArr : QUEUE = struct
         let x = q.elements.(index) in
         (*! cell.element <- dummy ; !*) (* TODO for garbage collection *)
         Atomic.Array.set q.timestamps index (tail + q.mask+1) ;
-        Some x
+        ref := x; true
       end
       else if ts < tail+1 then
         (* no element has been enqueued in this cell yet: fail here *)
-        None
+        false
       else begin
         (* either ts > tail+1, or the CAS failed; in either case,
         * another dequeuer got the cell before us: we try again *)
@@ -387,10 +408,12 @@ module BufferQueueAtomArr : QUEUE = struct
     try_dequeue ()
 
   let rec dequeue q =
-    begin match try_dequeue q with
-    | None   -> dequeue q
-    | Some x -> x
-    end
+    let bo = ExponentialBackoff.make () in
+    let ref = ref q.dummy in
+    if try_dequeue q ref bo then !ref else dequeue q
+
+  let rec dequeue_noalloc q ref bo =
+    if try_dequeue q ref bo then () else dequeue_noalloc q ref bo
 
 end
 
@@ -403,6 +426,7 @@ module BufferQueueAtomArrOpt : QUEUE = struct
       mask : int ;
       head : int Atomic.t ;
       tail : int Atomic.t ;
+      dummy : 'a ;
     }
 
   (* Default recommended capacity: 64 *)
@@ -418,10 +442,10 @@ module BufferQueueAtomArrOpt : QUEUE = struct
       mask = capacity - 1 ; (* i.e. 0b111111 if capacity = 0b1000000 *)
       head = Atomic.make 0 ;
       tail = Atomic.make 0 ;
+      dummy ;
     }
 
-  let try_enqueue q x =
-    let bo = ExponentialBackoff.make () in
+  let try_enqueue q x bo =
     let rec try_enqueue () =
       let head = Atomic.get q.head in
       let index = head land q.mask in
@@ -445,11 +469,14 @@ module BufferQueueAtomArrOpt : QUEUE = struct
     in
     try_enqueue ()
 
-  let enqueue q x =
-    while not @@ try_enqueue q x do () done
+  let enqueue_noalloc q bo x =
+    while not @@ try_enqueue q x bo do () done
 
-  let try_dequeue q =
+  let enqueue q x =
     let bo = ExponentialBackoff.make () in
+    while not @@ try_enqueue q x bo do () done
+
+  let try_dequeue q ref bo =
     let rec try_dequeue () =
       let tail = Atomic.get q.tail in
       let index = tail land q.mask in
@@ -460,11 +487,11 @@ module BufferQueueAtomArrOpt : QUEUE = struct
         let x = q.elements.(real_index) in
         (*! cell.element <- dummy ; !*) (* TODO for garbage collection *)
         Atomic.Array.set q.timestamps real_index (tail + q.mask+1) ;
-        Some x
+        ref := x ; true
       end
       else if ts < tail+1 then
         (* no element has been enqueued in this cell yet: fail here *)
-        None
+        false
       else begin
         (* either ts > tail+1, or the CAS failed; in either case,
         * another dequeuer got the cell before us: we try again *)
@@ -475,9 +502,11 @@ module BufferQueueAtomArrOpt : QUEUE = struct
     try_dequeue ()
 
   let rec dequeue q =
-    begin match try_dequeue q with
-    | None   -> dequeue q
-    | Some x -> x
-    end
+    let bo = ExponentialBackoff.make () in
+    let ref = ref q.dummy in
+    if try_dequeue q ref bo then !ref else dequeue q
+
+  let rec dequeue_noalloc q ref bo =
+    if try_dequeue q ref bo then () else dequeue_noalloc q ref bo
 
 end

@@ -1,7 +1,8 @@
 (executable
    (name bench)
    (modules bench queue)
-   (libraries unix))
+   (libraries unix bechamel bechamel-notty bechamel-perf notty.unix)
+   (flags "-runtime-variant=i"))
 
 (executable
    (name array_accesses)
