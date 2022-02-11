@@ -13,7 +13,7 @@ let my_fprintf out =
   end
 let my_printf fmt = my_fprintf stdout fmt
 
-let nmax = 40_000
+let nmax = 12_000_000
 let nb_consumers = 1
 let nb_per_consumer =
   assert (nmax mod nb_consumers = 0) ;
@@ -30,6 +30,7 @@ module Bench (Q : Queue.QUEUE) = struct
   let allocate capacity = Q.make ~capacity ~dummy:42
 
   let producer q tid =
+    let minor0 = Gc.minor_words () in
     let init = tid*nb_per_producer in
     let bo = Queue.ExponentialBackoff.make () in
     for n = init+1 to init+nb_per_producer do
@@ -37,9 +38,11 @@ module Bench (Q : Queue.QUEUE) = struct
       Q.enqueue_noalloc q bo n;
       (*my_printf "enqueued\n" ;*)
     done;
-    minor_allocated.(tid) <- minor_allocated.(tid) +. Gc.minor_words ()
+    let minor1 = Gc.minor_words () in
+    minor_allocated.(tid) <- minor_allocated.(tid) +. (minor1 -. minor0)
 
   let consumer q tid =
+    let minor0 = Gc.minor_words () in
     let sum = ref 0 in
     let tmp = ref 42 in
     let bo = Queue.ExponentialBackoff.make () in
@@ -50,7 +53,8 @@ module Bench (Q : Queue.QUEUE) = struct
       sum := !sum + !tmp ;
       (*my_printf "    dequeued %i\n" n ;*)
     done ;
-    minor_allocated.(tid) <- minor_allocated.(tid) +. Gc.minor_words ();
+    let minor1 = Gc.minor_words () in
+    minor_allocated.(tid) <- minor_allocated.(tid) +. (minor1 -. minor0);
     !sum
 
   let f q =
@@ -78,8 +82,8 @@ let mk_test ~name ~allocate f =
   Test.make_indexed_with_resource
     ~name
     (*~args:[ 64; 256; 1024; 4096; 16384; 32768 ]*)
-    (*~args:[ 64; 1024; 16384; 32768 ]*)
-    ~args:[ 16384; ]
+    ~args:[ 64; 1024; 16384; 32768 ]
+    (*~args:[ 16384; ]*)
     ~fmt:"%s:%05d"
     Test.uniq
     ~allocate
@@ -88,28 +92,26 @@ let mk_test ~name ~allocate f =
 
 let test0 =
   mk_test
-    ~name:"original"
+    ~name:"orig"
     ~allocate:BOrig.allocate
     (fun _ -> Staged.stage BOrig.f)
-(*
 let test1 =
   mk_test
-    ~name:"array of atomics"
+    ~name:"boxed arr."
     ~allocate:BArrAtom.allocate
     (fun _ -> Staged.stage BArrAtom.f)
 let test2 =
   mk_test
-    ~name:"atomic array"
+    ~name:"flat arr."
     ~allocate:BAtomArr.allocate
     (fun _ -> Staged.stage BAtomArr.f)
-*)
 let test3 =
   mk_test
-    ~name:"padded atomic array"
+    ~name:"padded flat arr."
     ~allocate:BAtomArrOpt.allocate
     (fun _ -> Staged.stage BAtomArrOpt.f)
-let test = Test.make_grouped ~name:"sum of integers" ~fmt:"%s (%s)"
-  [ test0; test3 ]
+let test = Test.make_grouped ~name:"sum" ~fmt:"%s (%s)"
+  [ test0; test1; test2; test3 ]
 
 module Producer_minor_allocated = struct
   type witness = unit
@@ -135,12 +137,22 @@ module Consumer_minor_allocated = struct
       (sub minor_allocated ~pos:nb_producers ~len:nb_consumers))
 end
 
+module Monotonic_clock_ms = struct
+  include Toolkit.Monotonic_clock
+
+  let unit _ = "ms"
+  let get () = get () /. 1_000_000.
+end
+
 module MyMeasures = struct
   let producer_minor_allocated =
     Measure.register (module Producer_minor_allocated)
 
   let consumer_minor_allocated =
     Measure.register (module Consumer_minor_allocated)
+
+  let monotonic_clock_ms =
+    Measure.register (module Monotonic_clock_ms)
 end
 
 module MyInstance = struct
@@ -153,6 +165,11 @@ module MyInstance = struct
     Measure.instance
       (module Consumer_minor_allocated)
       MyMeasures.consumer_minor_allocated
+
+  let monotonic_clock_ms =
+    Measure.instance
+      (module Monotonic_clock_ms)
+      MyMeasures.monotonic_clock_ms
 end
 
 let benchmark () =
@@ -160,12 +177,13 @@ let benchmark () =
     Analyze.ols ~bootstrap:0 ~r_square:true ~predictors:Measure.[| run |]
   in
   let instances =
-    Instance.[ minor_allocated; major_allocated; monotonic_clock;
-      minor_collection; major_collection; ] @
-    MyInstance.[ producer_minor_allocated; consumer_minor_allocated ]
+    Instance.[ minor_allocated; major_allocated; minor_collection;
+      major_collection; ] @
+    MyInstance.[ monotonic_clock_ms; producer_minor_allocated;
+      consumer_minor_allocated ]
   in
   let cfg =
-    Benchmark.cfg ~limit:100 ~quota:(Time.second 20.) ~stabilize:true ()
+    Benchmark.cfg ~limit:12 ~quota:(Time.second 120.) ~stabilize:true ()
   in
   let raw_results = Benchmark.all cfg instances test in
   let results =
@@ -177,9 +195,10 @@ let benchmark () =
 let () =
   List.iter
     (fun v -> Bechamel_notty.Unit.add v (Measure.unit v)) @@
-      Instance.[ minor_allocated; major_allocated; monotonic_clock;
-        minor_collection; major_collection; ] @
-      MyInstance.[ producer_minor_allocated; consumer_minor_allocated ]
+      Instance.[ minor_allocated; major_allocated; minor_collection;
+        major_collection; ] @
+      MyInstance.[ monotonic_clock_ms; producer_minor_allocated;
+        consumer_minor_allocated ]
 
 let img (window, results) =
   Bechamel_notty.Multiple.image_of_ols_results ~rect:window
@@ -187,11 +206,27 @@ let img (window, results) =
 
 open Notty_unix
 
+let results_file = "results.json"
+
 let () =
   let window =
     match winsize Unix.stdout with
     | Some (w,h) -> { Bechamel_notty.w; h }
     | None -> { Bechamel_notty.w = 80; h = 1 }
   in
-  let results, _ = benchmark () in
-  img (window, results) |> eol |> output_image
+  let results, raw_results = benchmark () in
+  raw_results |> Hashtbl.iter (fun name raw ->
+    Printf.printf
+      "%s ->\n  { samples = %d;\n    time = %f; }\n"
+      name
+      raw.Benchmark.stats.samples
+      (Int64.to_float (Time.span_to_uint64_ns raw.Benchmark.stats.time) /. 1.e9));
+  Printf.printf "Time graphs printed to %s\n\n" results_file;
+  img (window, results) |> eol |> output_image;
+  let results =
+    let open Bechamel_js in
+    emit ~dst:(channel results_file) (fun _ -> Ok ()) ~compare ~x_label:Measure.run
+      ~y_label:(Measure.label Instance.monotonic_clock)
+      (results, raw_results)
+  in
+  match results with Ok () -> () | Error (`Msg err) -> invalid_arg err

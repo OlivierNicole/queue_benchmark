@@ -1,7 +1,7 @@
 (executable
    (name bench)
    (modules bench queue)
-   (libraries unix bechamel bechamel-notty bechamel-perf notty.unix)
+   (libraries unix bechamel bechamel-notty bechamel-perf bechamel-js notty.unix)
    (flags "-runtime-variant=i"))
 
 (executable
