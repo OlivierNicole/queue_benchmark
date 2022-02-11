@@ -13,7 +13,7 @@ let my_fprintf out =
   end
 let my_printf fmt = my_fprintf stdout fmt
 
-let nmax = 12_000_000
+let nmax = 120_000_000
 let nb_consumers = 1
 let nb_per_consumer =
   assert (nmax mod nb_consumers = 0) ;
@@ -172,18 +172,17 @@ module MyInstance = struct
       MyMeasures.monotonic_clock_ms
 end
 
+let instances =
+  Bechamel_perf.Instance.[ minor_allocated; major_allocated; minor_collection;
+    major_collection; cache_misses; branch_misses; ] @
+  MyInstance.[ monotonic_clock_ms; ]
+
 let benchmark () =
   let ols =
     Analyze.ols ~bootstrap:0 ~r_square:true ~predictors:Measure.[| run |]
   in
-  let instances =
-    Instance.[ minor_allocated; major_allocated; minor_collection;
-      major_collection; ] @
-    MyInstance.[ monotonic_clock_ms; producer_minor_allocated;
-      consumer_minor_allocated ]
-  in
   let cfg =
-    Benchmark.cfg ~limit:12 ~quota:(Time.second 120.) ~stabilize:true ()
+    Benchmark.cfg ~limit:2 ~quota:(Time.second 40.) ~stabilize:true ()
   in
   let raw_results = Benchmark.all cfg instances test in
   let results =
@@ -194,11 +193,7 @@ let benchmark () =
 
 let () =
   List.iter
-    (fun v -> Bechamel_notty.Unit.add v (Measure.unit v)) @@
-      Instance.[ minor_allocated; major_allocated; minor_collection;
-        major_collection; ] @
-      MyInstance.[ monotonic_clock_ms; producer_minor_allocated;
-        consumer_minor_allocated ]
+    (fun v -> Bechamel_notty.Unit.add v (Measure.unit v)) instances
 
 let img (window, results) =
   Bechamel_notty.Multiple.image_of_ols_results ~rect:window
@@ -206,7 +201,11 @@ let img (window, results) =
 
 open Notty_unix
 
-let results_file = "results.json"
+let results_files =
+  instances |> List.map
+    (fun instance ->
+      let label = Measure.label instance in
+      (label, Printf.sprintf "results-%s.json" label))
 
 let () =
   let window =
@@ -221,12 +220,14 @@ let () =
       name
       raw.Benchmark.stats.samples
       (Int64.to_float (Time.span_to_uint64_ns raw.Benchmark.stats.time) /. 1.e9));
-  Printf.printf "Time graphs printed to %s\n\n" results_file;
+  Printf.printf "Graphs printed to results-*.json\n\n";
   img (window, results) |> eol |> output_image;
-  let results =
-    let open Bechamel_js in
-    emit ~dst:(channel results_file) (fun _ -> Ok ()) ~compare ~x_label:Measure.run
-      ~y_label:(Measure.label Instance.monotonic_clock)
-      (results, raw_results)
-  in
-  match results with Ok () -> () | Error (`Msg err) -> invalid_arg err
+  results_files |> List.iter
+    (fun (y_label, results_file) ->
+      let results =
+        let open Bechamel_js in
+        emit ~dst:(channel results_file) (fun _ -> Ok ()) ~compare
+          ~x_label:Measure.run ~y_label (results, raw_results)
+      in
+      match results with Ok () -> () | Error (`Msg err) -> invalid_arg err
+    )
