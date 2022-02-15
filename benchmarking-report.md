@@ -37,7 +37,7 @@ the enqueuer and the dequeuer is very low.
 - **flat array:** The queue consists in two arrays, an `'a array` for the queued
   elements, and an `int array` for the timestamps. Atomic accesses in this array
   are performed using the new atomic primitives.
-- **flat padded array:** In all previous implementations, the lengths of the
+- **padded flat array:** In all previous implementations, the lengths of the
   arrays are equal to the capacity of the queue. This implementation is an
   attempt to minimize cache invalidation, i.e. the cost of maintaining cache
   consistency when two cores perform modifications in the same cache line.
