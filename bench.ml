@@ -23,10 +23,9 @@ module Bench (Q : Queue.QUEUE) = struct
   let producer q tid =
     let minor0 = Gc.minor_words () in
     let init = tid*nb_per_producer in
-    let bo = Queue.ExponentialBackoff.make () in
     for n = init+1 to init+nb_per_producer do
       (*my_printf "enqueue %i…\n" n ;*)
-      Q.enqueue_noalloc q bo n;
+      Q.enqueue q n;
       (*my_printf "enqueued\n" ;*)
     done;
     let minor1 = Gc.minor_words () in
@@ -35,13 +34,10 @@ module Bench (Q : Queue.QUEUE) = struct
   let consumer q tid =
     let minor0 = Gc.minor_words () in
     let sum = ref 0 in
-    let tmp = ref 42 in
-    let bo = Queue.ExponentialBackoff.make () in
     for _ = 1 to nb_per_consumer do
       (*my_printf "    dequeue…\n" ;*)
-      let () = Q.dequeue_noalloc q tmp bo in
-      Queue.ExponentialBackoff.reset bo;
-      sum := !sum + !tmp ;
+      let n = Q.dequeue q in
+      sum := !sum + n ;
       (*my_printf "    dequeued %i\n" n ;*)
     done ;
     let minor1 = Gc.minor_words () in

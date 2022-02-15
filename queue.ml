@@ -186,7 +186,7 @@ module BufferQueue : QUEUE = struct
     try_enqueue ()
 
   let enqueue_noalloc q bo x =
-    while not @@ try_enqueue q x bo do () done
+    while not (try_enqueue q x bo) do () done
 
   let enqueue q x =
     let bo = ExponentialBackoff.make () in
@@ -470,11 +470,11 @@ module BufferQueueAtomArrOpt : QUEUE = struct
     try_enqueue ()
 
   let enqueue_noalloc q bo x =
-    while not @@ try_enqueue q x bo do () done
+    while not (try_enqueue q x bo) do () done
 
   let enqueue q x =
     let bo = ExponentialBackoff.make () in
-    while not @@ try_enqueue q x bo do () done
+    while not (try_enqueue q x bo) do () done
 
   let try_dequeue q ref bo =
     let rec try_dequeue () =
