@@ -13,6 +13,8 @@ The four queue implementation are in four modules at
 The benchmarking code is in
 [bench.ml](https://github.com/OlivierNicole/queue_benchmark/blob/master/bench.ml).
 
+The code can be compiled with `dune build bench`.
+
 I chose the benchmark to minimize contention. It consists in two OCaml domains,
 one producer and one consumer, mutating a shared queue. The producer enqueues
 all integers from 1 to N, while the consumer dequeues and sums them.
