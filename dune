@@ -1,8 +1,7 @@
 (executable
    (name bench)
    (modules bench queue)
-   (libraries unix bechamel bechamel-notty bechamel-js notty.unix)
-   (flags "-runtime-variant=i"))
+   (libraries unix))
 
 (executable
    (name array_accesses)
