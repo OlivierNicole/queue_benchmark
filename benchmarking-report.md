@@ -1,6 +1,17 @@
 # Benchmarking four implementations of the same concurrent queue – Discussion
 
+## Compiler
+
+The compiler used must have atomic array support:
+<https://github.com/OlivierNicole/ocaml/tree/5.00%2Batomic_arrays>.
+
 ## Benchmark code
+
+The four queue implementation are in four modules at
+[queue.ml, ll.
+129-512](https://github.com/OlivierNicole/queue_benchmark/blob/master/queue.ml#L129-L512).
+The benchmarking code is in
+[bench.ml](https://github.com/OlivierNicole/queue_benchmark/blob/master/bench.ml).
 
 I chose the benchmark to minimize contention. It consists in two OCaml domains,
 one producer and one consumer, mutating a shared queue. The producer enqueues
@@ -150,6 +161,11 @@ major collections: 784, minor collections: 19223, minor allocated: 2693143039.00
   more.
 - I'm not sure how to interpret the higher number of `instructions` for **padded
   flat array**, nor the higher number of cache misses.
+- Removing the generative functor `DoBechamelBench` (defined at
+  <https://github.com/OlivierNicole/queue_benchmark/blob/master/bench.ml#L105>)
+  makes **original** run 3 times faster, although this functor is never
+  instantiated. I suspect a micro-architectural optimization conditioned to
+  alignment. I don't knwon why only **original** benefits from it.
 - This benchmark only considers arrays of integers (or of `int Atomic.t`s).
   Maybe working with more complex values would increase the advantage of flat
   arrays.
