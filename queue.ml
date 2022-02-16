@@ -510,3 +510,104 @@ module BufferQueueAtomArrOpt : QUEUE = struct
     if try_dequeue q ref bo then () else dequeue_noalloc q ref bo
 
 end
+
+module BufferQueuePadHeadTail : QUEUE = struct
+
+  type 'a cell =
+    {
+      timestamp : int Atomic.t ;
+      mutable element : 'a ;
+    }
+
+  type 'a t =
+    {
+      buf : 'a cell array ;
+      mask : int ;
+      (* The head is at index 0, the tail at index 8, the rest is padding so
+         that the two are on different cache lines. *)
+      headtail : int array;
+      dummy : 'a;
+    }
+
+  (* Default recommended capacity: 64 *)
+  let make ~capacity ~dummy =
+    assert (capacity >= 2) ;
+    (* check that the capacity is a power of two (not required by the algorithm,
+     * but it allows more efficient array lookups): *)
+    assert (capacity land (capacity - 1) = 0) ;
+    {
+      buf = Array.init capacity (fun i ->
+          {
+            timestamp = Atomic.make i ;
+            element = dummy ;
+          }
+        ) ;
+      mask = capacity - 1 ; (* i.e. 0b111111 if capacity = 0b1000000 *)
+      headtail = Array.make 9 0;
+      dummy ;
+    }
+
+  let try_enqueue q x bo =
+    let rec try_enqueue () =
+      let head = Atomic.Array.get q.headtail 0 in
+      let cell = q.buf.(head land q.mask) in
+      let ts = Atomic.get cell.timestamp in
+      if ts = head && Atomic.Array.compare_and_set q.headtail 0 head (head+1) then begin
+        (* cell is available and we got it first: write our value *)
+        cell.element <- x ;
+        Atomic.set cell.timestamp (head+1) ;
+        true
+      end
+      else if ts < head then
+        (* cell is still in use in previous round: fail here *)
+        false
+      else begin
+        (* either ts > head, or the CAS failed; in either case,
+        * another enqueuer got the cell before us: we try again *)
+        ExponentialBackoff.backoff bo ;
+        try_enqueue ()
+      end
+    in
+    try_enqueue ()
+
+  let enqueue_noalloc q bo x =
+    while not (try_enqueue q x bo) do () done
+
+  let enqueue q x =
+    let bo = ExponentialBackoff.make () in
+    while not @@ try_enqueue q x bo do () done
+
+  let try_dequeue q ref bo =
+    let rec try_dequeue () =
+      let tail = Atomic.Array.get q.headtail 8 in
+      let cell = q.buf.(tail land q.mask) in
+      let ts = Atomic.get cell.timestamp in
+      if ts = tail+1 && Atomic.Array.compare_and_set q.headtail 8 tail (tail+1) then begin
+        (* cell is available and we got it first: read its value *)
+        let x = cell.element in
+        (*! cell.element <- dummy ; !*) (* TODO for garbage collection *)
+        Atomic.set cell.timestamp (tail + q.mask+1) ;
+        ref := x; true
+      end
+      else if ts < tail+1 then
+        (* no element has been enqueued in this cell yet: fail here *)
+        false
+      else begin
+        (* either ts > tail+1, or the CAS failed; in either case,
+        * another dequeuer got the cell before us: we try again *)
+        ExponentialBackoff.backoff bo ;
+        try_dequeue ()
+      end
+    in
+    try_dequeue ()
+
+  let rec dequeue q =
+    let bo = ExponentialBackoff.make () in
+    let ref = ref q.dummy in
+    if try_dequeue q ref bo then !ref else dequeue q
+
+  let rec dequeue_noalloc q ref bo =
+    if try_dequeue q ref bo then () else dequeue_noalloc q ref bo
+
+end
+

@@ -75,17 +75,20 @@ module BArrAtom = Bench (Queue.BufferQueueArrAtom)
 module BAtomArr = Bench (Queue.BufferQueueAtomArr)
 module BAtomArrOpt = Bench (Queue.BufferQueueAtomArrOpt)
 module BOrig = Bench (Queue.BufferQueue)
+module BOrigOpt = Bench (Queue.BufferQueuePadHeadTail)
 
 let orig = ref false
 let arr_atom = ref false
 let atom_arr = ref false
 let atom_arr_opt = ref false
+let orig_opt = ref false
 
 let speclist =
   [ ("-orig", Arg.Set orig, "Original queue implementation");
     ("-arratom", Arg.Set arr_atom, "Array of atomics");
     ("-atomarr", Arg.Set atom_arr, "Atomic arrays");
     ("-atomarropt", Arg.Set atom_arr_opt, "Atomic arrays (padded)");
+    ("-origopt", Arg.Set orig_opt, "Original but padded head and tail");
   ]
 
 let capacity = 1024
@@ -98,3 +101,4 @@ let () =
   (if !arr_atom then BArrAtom.bench ~name:"Array of atomics" ~capacity);
   (if !atom_arr then BAtomArr.bench ~name:"Atomic array" ~capacity);
   (if !atom_arr_opt then BAtomArrOpt.bench ~name:"Atomic array (padded)" ~capacity);
+  (if !orig_opt then BOrigOpt.bench ~name:"Original but padded head and tail" ~capacity);
