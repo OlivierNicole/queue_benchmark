@@ -1,25 +1,3 @@
-(*** Timer ********************************************************************)
-
-module Time = struct
-
-  (* nanoseconds since the beginning of the program *)
-  type t = int
-
-  let get () : t =
-    int_of_float (Sys.time () *. 1e9)
-
-  let pp out (t : t) =
-    Printf.fprintf out "%.3gs" (float t /. 1.e9)
-
-  let timed (f : unit -> 'a) : 'a =
-    let t0 = get () in
-    let res = f () in
-    let t1 = get () in
-    Printf.fprintf stderr "time: %a\n%!" pp (t1 - t0) ;
-    res
-
-end
-
 (*** Backoff ******************************************************************)
 
 module type BACKOFF = sig
@@ -48,69 +26,6 @@ module ExponentialBackoff : BACKOFF = struct
     Unix.sleepf (Random.float cur)
   let reset bo =
     bo.cur <- bo.min
-end
-
-(*** Lock *********************************************************************)
-
-module type LOCK = sig
-  type t
-  val make : unit -> t
-  val acquire : t -> unit
-  val release : t -> unit
-end
-
-let make_critical (module Lock : LOCK) () : (unit -> 'a) -> 'a =
-  let lock = Lock.make () in
-  fun f ->
-    Lock.acquire lock ;
-    begin match f () with
-    | res         -> Lock.release lock ; res
-    | exception e -> Lock.release lock ; raise e
-    end
-
-let critical_timer : Time.t Atomic.t = Atomic.make 0
-
-let make_critical_timed (module Lock : LOCK) () : (unit -> 'a) -> 'a =
-  let lock = Lock.make () in
-  fun f ->
-    let t0 = Time.get () in
-    Lock.acquire lock ;
-    begin match f () with
-    | res         ->
-        Lock.release lock ;
-        Atomic.fetch_and_add critical_timer (Time.get () - t0) |> ignore ;
-        res
-    | exception e ->
-        Lock.release lock ;
-        Atomic.fetch_and_add critical_timer (Time.get () - t0) |> ignore ;
-        raise e
-    end
-
-(* the test-and-set lock:
- * the most basic spin lock, CPU-intensive and provokes many cache misses. *)
-module TASLock : LOCK = struct
-  type t = bool Atomic.t
-  let make () =
-    Atomic.make false
-  let acquire lock =
-    while Atomic.exchange lock true do () done
-  let release lock =
-    assert (Atomic.exchange lock false)
-end
-
-(* the test-and-test-and-set lock:
- * has a much better cache behavior with many threads. *)
-module TTASLock : LOCK = struct
-  type t = bool Atomic.t
-  let make () =
-    Atomic.make false
-  let acquire lock =
-    while Atomic.get lock do () done ;
-    while Atomic.exchange lock true do
-      while Atomic.get lock do () done
-    done
-  let release lock =
-    assert (Atomic.exchange lock false)
 end
 
 (*** Queue ********************************************************************)
