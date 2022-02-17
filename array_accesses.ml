@@ -2,6 +2,13 @@ let iterations = 10_000
 
 let array_size = ref 1024
 
+let atomic_but_allocate_junk nwords_junk (root : int list list ref) =
+  let atomic = Atomic.make 0 in
+  let junk = List.init (nwords_junk / 2) (fun _ -> 42) in
+  ignore (Sys.opaque_identity junk);
+  root := junk :: !root;
+  atomic
+
 let run_timed s arr_size f =
   Gc.full_major ();
   let start = Sys.time () in
@@ -30,7 +37,8 @@ let atomic_arrayt_sequential arr_size =
       let x = Array.get arr i |> Atomic.get in
         Sys.opaque_identity(x) |> ignore
     done
-  done
+  done;
+  ignore (Sys.opaque_identity root)
 
 let atomic_array_random arr_size =
   let arr = Array.make arr_size 0 in
@@ -54,7 +62,8 @@ let atomic_arrayt_random arr_size =
       let x = Array.get arr idx |> Atomic.get in
         Sys.opaque_identity(x) |> ignore
     done
-  done
+  done;
+  ignore (Sys.opaque_identity root)
 
 
 
