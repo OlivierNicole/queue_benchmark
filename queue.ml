@@ -525,4 +525,3 @@ module BufferQueuePadHeadTail : QUEUE = struct
     if try_dequeue q ref bo then () else dequeue_noalloc q ref bo
 
 end
-
